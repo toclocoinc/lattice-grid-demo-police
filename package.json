@@ -1,0 +1,16 @@
+{
+  "name": "lattice-grid-demo-police",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "python3 -m http.server 8123",
+    "snapshot": "node tools/build-snapshot.mjs",
+    "preview": "node tools/build-preview.mjs"
+  },
+  "license": "MIT",
+  "description": "A dashboard of recorded street crime and stop and search in central London.",
+  "dependencies": {
+    "@toclocoinc/lattice-grid": "1.60.0"
+  },
+  "private": true,
+  "type": "module"
+}

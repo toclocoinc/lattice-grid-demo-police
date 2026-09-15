@@ -159,23 +159,6 @@ body {
   min-height: 0;
 }
 
-/*
- * A tab that mounts something of its own is handed the panel's inner body,
- * which is laid out as a plain block. A pane that should fill the tab rather
- * than run past the bottom of it needs that body to be a column, so the two
- * panes below can take their height from it.
- */
-.tabs-host .lat-tabs__body {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.tabs-host .lat-tabs__body > * {
-  flex: 1;
-  min-height: 0;
-}
-
 .actions {
   align-items: center;
   display: flex;
@@ -217,6 +200,7 @@ body {
 .chart-wrap {
   display: grid;
   gap: 10px;
+  height: 100%;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-template-rows: repeat(2, minmax(0, 1fr));
   min-height: 0;
@@ -246,6 +230,7 @@ body {
 .split {
   display: grid;
   gap: 12px;
+  height: 100%;
   grid-template-columns: minmax(340px, 5fr) minmax(0, 7fr);
   min-height: 0;
   padding-top: 8px;

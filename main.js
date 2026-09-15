@@ -7,12 +7,17 @@
  * live.
  */
 
-import { createGrid } from './node_modules/@toclocoinc/lattice-grid/lattice-grid.esm.min.js';
+import { createGrid, setLicence } from './node_modules/@toclocoinc/lattice-grid/lattice-grid.esm.min.js';
 import { createChart } from './node_modules/@toclocoinc/lattice-grid/modules/charts.esm.min.js';
 import { createKPI } from './node_modules/@toclocoinc/lattice-grid/modules/kpi.esm.min.js';
 import { createTabs } from './node_modules/@toclocoinc/lattice-grid/modules/tabs.esm.min.js';
+import { DEMO_LICENCE } from './src/licence.js';
 import { fetchEverything } from './src/police-api.js';
 import { buildDashboard } from './src/dashboard.js';
+
+/* Applied before anything is drawn, because a grid that already exists keeps
+   whatever licence was in force when it was built. */
+setLicence(DEMO_LICENCE);
 
 const root = document.querySelector('#app');
 const params = new URLSearchParams(location.search);

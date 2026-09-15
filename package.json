@@ -2,9 +2,10 @@
   "name": "lattice-grid-demo-police",
   "version": "1.0.0",
   "scripts": {
-    "start": "python3 -m http.server 8123",
+    "start": "node tools/serve.mjs",
     "snapshot": "node tools/build-snapshot.mjs",
-    "preview": "node tools/build-preview.mjs"
+    "preview": "node tools/build-preview.mjs",
+    "verify": "node tools/verify.mjs"
   },
   "license": "MIT",
   "description": "A dashboard of recorded street crime and stop and search in central London.",

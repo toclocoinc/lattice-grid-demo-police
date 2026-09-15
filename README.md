@@ -1,14 +1,22 @@
 # Street crime in central London
 
-A dashboard of recorded street crime and stop and search in the heart of central London, covering the West End, Westminster and the City. It shows twelve months of data from the police data service: tens of thousands of individual records, with a sortable and filterable table, headline figures, charts, and a second dataset on its own tab.
+A dashboard of recorded street crime and stop and search in the heart of central London, built on Lattice Grid and reading the police data service directly from the browser.
 
-Everything on the page reads the same rows. Filter the table and the figures and the charts follow it.
+**[See it running](https://toclocoinc.github.io/lattice-grid-demo-police/)**
 
-## What you can see
+| | |
+| --- | --- |
+| Grid on npm | [@toclocoinc/lattice-grid](https://www.npmjs.com/package/@toclocoinc/lattice-grid) |
+| Grid repository | [toclocoinc/latticegrid](https://github.com/toclocoinc/latticegrid) |
+| Product site | [latticegrid.dev](https://www.latticegrid.dev) |
 
-**Street crime.** Every recorded crime in the area, one row each: the month, the type of crime, the street it was recorded near, the latest outcome, the district, and the coordinates. Group the rows by crime type, by month, or by both. Filter any column, search the whole table, and pick which columns you want.
+## What it shows
 
-**Headline figures.** How many crimes are in view, how many of them have an outcome recorded, how the latest month compares with the one before it, and the most common type of crime. These follow whatever the table is filtered to.
+Twelve months of data covering the West End, Westminster and the City: tens of thousands of individual records, in a table you can sort, filter and group, alongside headline figures and charts that all read the same rows. Filter the table and everything else follows it.
+
+**Street crime.** Every recorded crime in the area, one row each: the month, the type of crime, the street it was recorded near, the latest outcome, the district, and the coordinates. Group the rows by crime type, by month, or by both. Filter any column, search the whole table, and choose which columns you want to see.
+
+**Headline figures.** How many crimes are in view, how many of them have an outcome recorded, how the latest month compares with the one before it, and the most common type of crime.
 
 **Charts.** Crimes by type, crimes recorded each month, whether an outcome has been recorded month by month, and how the City compares with the West End.
 
@@ -16,19 +24,19 @@ Everything on the page reads the same rows. Filter the table and the figures and
 
 ## Running it
 
-You need Node and a way to serve a folder over HTTP. Nothing is compiled and there is no build step.
+You need Node. Nothing is compiled and there is no build step.
 
 ```
 npm install
 npm start
 ```
 
-Then open the address the server prints, for example `http://localhost:8123/`.
+The server prints the address to open, for example `http://localhost:41234/`. It picks a free port each time so it will not clash with anything else you have running.
 
 The page fetches from the police data service as it loads, which takes about twenty seconds and makes twenty six requests. To open the saved copy instead, so the page works with no network at all, add `?source=snapshot` to the address:
 
 ```
-http://localhost:8123/?source=snapshot
+http://localhost:41234/?source=snapshot
 ```
 
 The saved copy lives in `data/snapshot/` and records the date and time it was fetched. To take a fresh one:
@@ -49,7 +57,7 @@ npm run preview
 
 The police data service at [data.police.uk](https://data.police.uk/), which publishes recorded crime and stop and search for England, Wales and Northern Ireland. The page calls it directly from your browser.
 
-Two things are worth knowing when you read the numbers.
+Three things are worth knowing when you read the numbers.
 
 Street level locations are approximate. Each crime is mapped to a nearby point rather than to an address, so the street shown is the closest anchor point, not where the crime happened.
 
@@ -59,10 +67,10 @@ The district shown against each record is worked out from the published coordina
 
 ## Licence
 
-The code in this repository is available under the MIT licence. See `LICENSE`.
+The code in this repository is available under the MIT licence. See [LICENSE](LICENSE).
+
+Lattice Grid itself is a separate commercial product with its own terms. It is free to use on localhost, with no key and no watermark, so a copy of this repository runs unrestricted on your own machine. This demo carries a key for its own published address only, which is why you will find one in the source. Keys for your own sites come from [latticegrid.dev](https://www.latticegrid.dev).
 
 Contains public sector information licensed under the Open Government Licence v3.0
 
 The data comes from [data.police.uk](https://data.police.uk/).
-
-The grid this dashboard is built on is a separate commercial product with its own licence, which is free to use on localhost.

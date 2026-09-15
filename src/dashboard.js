@@ -401,9 +401,24 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
     };
   };
 
+  /*
+   * The row of grouping buttons belongs to the crime tab alone, and showing
+   * or hiding it changes how much height is left for the tab below it. That
+   * has to happen before the incoming tab is built, not after: a pane that is
+   * measured and then made taller has to lay itself out a second time, which
+   * a reader sees as the view redrawing. `actions` is filled in further down,
+   * so this tolerates being called before it exists.
+   */
+  let actions = null;
+  const showActionsFor = (id) => {
+    if (actions) actions.hidden = id !== 'crime';
+  };
+
   const tabs = createTabs(tabsHost, {
     createGrid,
     ariaLabel: 'Dashboard views',
+    onBeforeTabChange: (event) => showActionsFor(event.id),
+    onTabChangeCancelled: (event) => showActionsFor(event.previousId),
     tabs: [
       {
         id: 'crime',
@@ -535,7 +550,7 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
   }
 
   /* A short row of shortcuts under the tabs, for the grouped views. */
-  const actions = el('div', 'actions');
+  actions = el('div', 'actions');
   const button = (label, onClick) => {
     const node = el('button', 'action', label);
     node.type = 'button';
@@ -549,12 +564,7 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
   actions.append(button('No grouping', () => built.crimeGrid && built.crimeGrid.columns.group([])));
   tabsHost.prepend(actions);
 
-  /* These buttons act on the crime grid, so they only belong on its tab. */
-  const showActionsFor = (id) => {
-    actions.hidden = id !== 'crime';
-  };
   showActionsFor(tabs.activeId);
-  tabs.on('tab:changed', (event) => showActionsFor(event.id));
 
   /* The licence line the Open Government Licence asks for. */
   const footer = el('footer', 'foot');

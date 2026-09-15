@@ -12,6 +12,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { access, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -40,12 +41,38 @@ async function findChrome() {
   );
 }
 
+/**
+ * This check talks to the browser over a WebSocket, which Node only provides
+ * as a global from version 22. Say so plainly rather than failing later with
+ * an unexplained missing name.
+ */
+function requireModernNode() {
+  if (typeof WebSocket === 'undefined') {
+    throw new Error(
+      `This check needs Node 22 or newer. You are running ${process.version}, which has no built in WebSocket.`,
+    );
+  }
+}
+
+/** A free TCP port, asked of the operating system. */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.on('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
 const failures = [];
 let browser;
 let profile;
 let server;
 
 try {
+  requireModernNode();
   const chromePath = await findChrome();
   const started = await startServer(0);
   server = started.server;
@@ -54,7 +81,9 @@ try {
   console.log(`Opening: ${url}`);
 
   profile = await mkdtemp(join(tmpdir(), 'police-demo-verify-'));
-  const port = 9222;
+  /* A port of the operating system's choosing, so two checks running side by
+     side on one machine cannot land on the same debugging socket. */
+  const port = await freePort();
   browser = spawn(chromePath, [
     '--headless=new',
     `--remote-debugging-port=${port}`,

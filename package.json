@@ -10,8 +10,11 @@
   "license": "MIT",
   "description": "A dashboard of recorded street crime and stop and search in central London.",
   "dependencies": {
-    "@toclocoinc/lattice-grid": "1.60.0"
+    "@toclocoinc/lattice-grid": "^1.61.0"
   },
   "private": true,
-  "type": "module"
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  }
 }

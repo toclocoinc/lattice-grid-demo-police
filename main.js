@@ -86,15 +86,25 @@ async function start() {
       update('Building the dashboard...', 1);
     } else {
       const update = showProgress('Asking the police data service what it holds...');
-      const result = await fetchEverything({
-        months: 12,
-        concurrency: 3,
-        onProgress: ({ done, total, kind, month }) => {
-          const what = kind === 'crimes' ? 'street crime' : 'stop and search';
-          update(`Fetched ${what} for ${month} (${done} of ${total} months of data)`, done / total);
-        },
-      });
-      data = { ...result, meta: { ...result.meta, live: true } };
+      try {
+        const result = await fetchEverything({
+          months: 12,
+          concurrency: 3,
+          onProgress: ({ done, total, kind, month }) => {
+            const what = kind === 'crimes' ? 'street crime' : 'stop and search';
+            update(`Fetched ${what} for ${month} (${done} of ${total} months of data)`, done / total);
+          },
+        });
+        data = { ...result, meta: { ...result.meta, live: true } };
+      } catch (liveError) {
+        /* The service is out of our hands, so a bad day for it should not be
+           a blank page here. The saved copy shows the same dashboard, and the
+           masthead says plainly that is what you are looking at. */
+        console.warn('[police demo] the live fetch failed, falling back to the saved copy:', liveError);
+        update('The police data service could not be reached. Opening the saved copy...', 1);
+        const saved = await loadSnapshot();
+        data = { ...saved, meta: { ...saved.meta, live: false, fellBack: true } };
+      }
     }
 
     const fetched = performance.now();
@@ -112,6 +122,7 @@ async function start() {
     const finished = performance.now();
     const timings = {
       mode,
+      fellBack: !!data.meta.fellBack,
       crimes: data.crimes.length,
       stops: data.stops.length,
       requests: data.meta.requests || 0,

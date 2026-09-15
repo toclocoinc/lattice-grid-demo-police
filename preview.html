@@ -296,6 +296,16 @@ body {
   display: none;
 }
 
+/* Said when the saved copy is standing in for data that could not be fetched. */
+.notice {
+  background: #fdf3e3;
+  border: 1px solid #f0d9a8;
+  border-radius: 7px;
+  color: #6b4d12;
+  margin: 8px 0 0;
+  padding: 6px 10px;
+}
+
     </style>
   </head>
   <body>
@@ -838,6 +848,20 @@ function buildDashboard({ root, createGrid, createChart, createKPI, createTabs, 
         `covering the West End, Westminster and the City. ${period}.`,
     ),
   );
+  /*
+   * When the live fetch could not be completed the saved copy is shown
+   * instead, and this says so. A reader should never have to wonder whether
+   * the figures in front of them are today's.
+   */
+  if (meta.fellBack) {
+    heading.append(
+      el(
+        'p',
+        'notice',
+        'The police data service could not be reached, so this is the saved copy. Reloading the page will try again.',
+      ),
+    );
+  }
   header.append(heading);
 
   const provenance = el('div', 'head-note');

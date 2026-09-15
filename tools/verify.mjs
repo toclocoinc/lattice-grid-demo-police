@@ -208,6 +208,54 @@ try {
   if (consoleErrors.length) failures.push(`the page logged ${consoleErrors.length} console error(s):\n    ${consoleErrors.join('\n    ')}`);
   if (pageErrors.length) failures.push(`the page threw ${pageErrors.length} error(s):\n    ${pageErrors.join('\n    ')}`);
 
+  /*
+   * What a visitor gets when the police data service cannot be reached.
+   *
+   * The service is blocked in the browser rather than asked politely to fail,
+   * so this exercises the same path a real outage takes and the demo carries
+   * no test only code. A failed request does log to the console, so the check
+   * here is that nothing was thrown and the saved copy is on screen saying so.
+   */
+  console.log('\nWith the police data service unreachable:');
+  pageErrors.length = 0;
+  await call('Network.enable');
+  await call('Network.setBlockedURLs', { urls: ['*data.police.uk*'] });
+  await call('Page.navigate', { url: `http://127.0.0.1:${started.port}/index.html` });
+
+  await waitFor('!!(window.__policeDemo)', 120000, 'the page to settle with the service blocked');
+  const fallback = await evaluate(`(() => {
+    const demo = window.__policeDemo;
+    const notice = document.querySelector('.notice');
+    const pill = document.querySelector('.head-note .pill');
+    const note = document.querySelector('.head-note');
+    return {
+      ready: !!demo.ready,
+      error: demo.error || null,
+      rows: demo.crimeGrid ? demo.crimeGrid.rows.totalCount() : 0,
+      painted: document.querySelectorAll('.lattice [role="row"]').length,
+      fellBack: !!(demo.timings && demo.timings.fellBack),
+      mode: demo.timings && demo.timings.mode,
+      badge: pill ? pill.textContent.trim() : null,
+      notice: notice ? notice.textContent.trim() : null,
+      fetchedAtShown: note ? /Data fetched/.test(note.textContent) : false,
+    };
+  })()`);
+  if (!fallback.ready) failures.push(`the page did not fall back to the saved copy, it failed outright: ${fallback.error}`);
+  console.log(`  rows ${fallback.rows}, badge "${fallback.badge}", fell back: ${fallback.fellBack}`);
+  console.log(`  notice: ${fallback.notice}`);
+
+  if (!(fallback.rows > 0)) failures.push(`the fallback showed ${fallback.rows} rows`);
+  if (!(fallback.painted > 0)) failures.push('the fallback painted no rows');
+  if (!fallback.fellBack) failures.push('the page did not record that it fell back to the saved copy');
+  if (fallback.mode !== 'live') failures.push(`the fallback ran in "${fallback.mode}" mode, not the live default`);
+  if (fallback.badge !== 'Saved copy') failures.push(`the badge read "${fallback.badge}" rather than "Saved copy"`);
+  if (!fallback.notice || !/could not be reached/i.test(fallback.notice)) {
+    failures.push(`the page did not say the service was unreachable (notice: ${fallback.notice})`);
+  }
+  if (!fallback.fetchedAtShown) failures.push('the saved copy\'s date was not shown');
+  if (pageErrors.length) failures.push(`the fallback threw ${pageErrors.length} error(s):\n    ${pageErrors.join('\n    ')}`);
+
+  await call('Network.setBlockedURLs', { urls: [] });
   socket.close();
 } catch (error) {
   failures.push(String(error.message || error));

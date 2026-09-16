@@ -94,9 +94,11 @@ function prettify(id) {
 }
 
 /**
- * Fetch JSON, retrying the two failures this API actually produces: 429 when
- * the call rate is exceeded, and 503 when an area holds too many crimes to
- * return. A 503 is not retried, because it will not succeed on a second ask.
+ * Fetch JSON. The one failure handled here is 429, the service saying the
+ * call rate was exceeded, which is answered by waiting and asking again. A
+ * 503 means an area holds too many crimes to return and will not succeed on a
+ * second ask; anything else is left to the caller, which retries a whole
+ * month once.
  */
 async function getJSON(path, params, { fetchImpl = fetch, retries = 3 } = {}) {
   const url = new URL(path, API_BASE);
@@ -113,10 +115,6 @@ async function getJSON(path, params, { fetchImpl = fetch, retries = 3 } = {}) {
     }
     if (response.status === 429 && attempt < retries) {
       await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
-      continue;
-    }
-    if (attempt < retries && response.status >= 500) {
-      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
       continue;
     }
     throw new Error(`${path} returned ${response.status}`);
@@ -160,13 +158,19 @@ export async function fetchStops(month, opts) {
   return raw.map((record, index) => normaliseStop(record, month, index));
 }
 
-/** One published crime record, flattened. */
+/**
+ * One published crime record, flattened.
+ *
+ * Every row carries `dataset`, because both kinds of row travel through one
+ * data router on the page and that is the property it partitions them by.
+ */
 export function normaliseCrime(record, categoryNames) {
   const lat = record.location ? Number(record.location.latitude) : null;
   const lng = record.location ? Number(record.location.longitude) : null;
   const outcome = record.outcome_status ? record.outcome_status.category : null;
   return {
     id: record.id,
+    dataset: 'crime',
     month: record.month,
     monthLabel: monthLabel(record.month),
     category: categoryNames.get(record.category) || prettify(record.category),
@@ -193,6 +197,7 @@ export function normaliseStop(record, month, index) {
   const when = record.datetime ? String(record.datetime) : null;
   return {
     id: `${month}-${index}`,
+    dataset: 'stop',
     month,
     monthLabel: monthLabel(month),
     datetime: when,
@@ -214,55 +219,127 @@ export function normaliseStop(record, month, index) {
 }
 
 /**
- * Fetch every month of both datasets, a few requests at a time so the
- * published rate limit of 15 requests a second is never approached.
- * `onProgress` is called as each request finishes.
+ * Fetch every month of both datasets and hand each one over as it lands.
+ *
+ * The service takes several seconds to answer a monthly request, so the
+ * months are fetched a few at a time, newest first, and `onMonth` is called
+ * for each one the moment it arrives rather than once everything has. A
+ * month that fails is asked for a second time; if that fails too it is
+ * reported through `onFailed` and the rest carry on.
+ *
+ * The published rate limit is 15 requests a second. Six slow requests never
+ * approach it, but the service answers a repeated request from its cache in
+ * a fraction of a second, and six workers fed that quickly would. So no two
+ * requests start within `spacing` milliseconds of each other, whatever the
+ * workers are doing: at 100 ms that is ten a second at most.
+ *
+ * `onStart` is called once the months are known, before any of them lands.
+ * The promise resolves once every month has landed or been given up on.
  */
-export async function fetchEverything({ months = 12, concurrency = 3, onProgress, fetchImpl } = {}) {
+export async function streamEverything({
+  months = 12,
+  concurrency = 6,
+  spacing = 100,
+  onStart,
+  onMonth,
+  onFailed,
+  fetchImpl,
+} = {}) {
   const opts = fetchImpl ? { fetchImpl } : undefined;
-  const latest = await latestMonth(opts);
+
+  let nextStart = 0;
+  const takeTurn = async () => {
+    const now = Date.now();
+    const at = Math.max(now, nextStart);
+    nextStart = at + spacing;
+    if (at > now) await new Promise((resolve) => setTimeout(resolve, at - now));
+  };
+
+  const [latest, categoryNames] = await Promise.all([latestMonth(opts), crimeCategories(opts)]);
   const monthList = recentMonths(latest, months);
-  const categoryNames = await crimeCategories(opts);
+  if (onStart) onStart({ months: monthList, latestMonth: latest });
 
+  /* Newest month first, with its crimes and its stop and search side by
+     side, so the most recent figures are the first to reach the page. */
   const jobs = [];
-  for (const month of monthList) jobs.push({ kind: 'crimes', month });
-  for (const month of monthList) jobs.push({ kind: 'stops', month });
+  for (const month of monthList) {
+    jobs.push({ dataset: 'crime', month });
+    jobs.push({ dataset: 'stop', month });
+  }
 
-  const crimes = [];
-  const stops = [];
+  const failed = [];
   let done = 0;
   let requests = 2; // last updated, plus categories
+
+  const fetchJob = (job) =>
+    job.dataset === 'crime' ? fetchCrimes(job.month, categoryNames, opts) : fetchStops(job.month, opts);
 
   let next = 0;
   const worker = async () => {
     while (next < jobs.length) {
       const job = jobs[next];
       next += 1;
-      const rows =
-        job.kind === 'crimes'
-          ? await fetchCrimes(job.month, categoryNames, opts)
-          : await fetchStops(job.month, opts);
-      if (job.kind === 'crimes') crimes.push(...rows);
-      else stops.push(...rows);
+      let rows = null;
+      let error = null;
+      for (let attempt = 0; attempt < 2 && !rows; attempt += 1) {
+        /* A moment's pause before asking again: a request the service
+           turned away is not helped by an identical one on its heels. */
+        if (attempt) await new Promise((resolve) => setTimeout(resolve, 1000));
+        await takeTurn();
+        requests += 1;
+        try {
+          rows = await fetchJob(job);
+        } catch (thrown) {
+          error = thrown;
+        }
+      }
       done += 1;
-      requests += 1;
-      if (onProgress) onProgress({ done, total: jobs.length, kind: job.kind, month: job.month, rows: rows.length });
+      if (rows) {
+        if (onMonth) onMonth({ dataset: job.dataset, month: job.month, rows, done, total: jobs.length });
+      } else {
+        failed.push({ dataset: job.dataset, month: job.month, error });
+        if (onFailed) onFailed({ dataset: job.dataset, month: job.month, error, done, total: jobs.length });
+      }
     }
   };
   await Promise.all(Array.from({ length: concurrency }, worker));
 
+  return {
+    area: AREA_NAME,
+    months: monthList,
+    latestMonth: latest,
+    requests,
+    failed,
+    fetchedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Fetch every month of both datasets and return them whole, for the tool
+ * that saves a copy. A month that could not be fetched is an error here,
+ * because a saved copy with a month missing is worse than the one before it.
+ */
+export async function fetchEverything({ months = 12, concurrency = 6, onProgress, fetchImpl } = {}) {
+  const crimes = [];
+  const stops = [];
+  const meta = await streamEverything({
+    months,
+    concurrency,
+    fetchImpl,
+    onMonth: ({ dataset, month, rows, done, total }) => {
+      if (dataset === 'crime') crimes.push(...rows);
+      else stops.push(...rows);
+      if (onProgress) onProgress({ done, total, dataset, month, rows: rows.length });
+    },
+  });
+  if (meta.failed.length) {
+    const what = meta.failed.map((f) => `${f.dataset} ${f.month} (${f.error && f.error.message})`).join(', ');
+    throw new Error(`Could not fetch ${what}.`);
+  }
+
   crimes.sort((a, b) => (a.month < b.month ? 1 : a.month > b.month ? -1 : 0));
   stops.sort((a, b) => (a.datetime < b.datetime ? 1 : a.datetime > b.datetime ? -1 : 0));
 
-  return {
-    crimes,
-    stops,
-    meta: {
-      area: AREA_NAME,
-      months: monthList,
-      latestMonth: latest,
-      requests,
-      fetchedAt: new Date().toISOString(),
-    },
-  };
+  const { failed, ...rest } = meta;
+  return { crimes, stops, meta: rest };
 }

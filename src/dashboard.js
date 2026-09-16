@@ -21,16 +21,13 @@ function commas(value) {
   return Number(value || 0).toLocaleString('en-GB');
 }
 
-/** The months present in the rows, oldest first. */
-function monthsIn(rows) {
-  const seen = new Set();
-  for (const row of rows) if (row.month) seen.add(row.month);
-  return [...seen].sort();
-}
-
-/** Month options for a column that stores `2026-07` and should read `Jul 2026`. */
-function monthOptions(rows) {
-  return monthsIn(rows).map((month) => ({ id: month, label: monthLabel(month) }));
+/**
+ * Month options for a column that stores `2026-07` and should read `Jul 2026`,
+ * oldest first. The list is fixed when the grid is built, before any row has
+ * arrived, so it has to name every month a row could carry.
+ */
+function monthOptions(months) {
+  return [...new Set(months)].sort().map((month) => ({ id: month, label: monthLabel(month) }));
 }
 
 /** How many crimes fall in each month, oldest first. */
@@ -64,7 +61,7 @@ function topValue(rows, field) {
 /* ------------------------------------------------------------------ */
 
 /** The crime grid's columns, grouped under three headings. */
-function crimeColumns(rows) {
+function crimeColumns(months) {
   const coordinate = {
     type: 'number',
     format: { decimals: 4, thousandsSeparator: false },
@@ -85,7 +82,7 @@ function crimeColumns(rows) {
           id: 'month',
           field: 'month',
           title: 'Month',
-          lookup: { options: monthOptions(rows), sortBy: 'optionOrder' },
+          lookup: { options: months, sortBy: 'optionOrder' },
           filter: { type: 'set' },
           sort: { direction: 'asc' },
           layout: { width: 110 },
@@ -160,7 +157,7 @@ function crimeColumns(rows) {
 }
 
 /** The stop and search grid's columns. */
-function stopColumns(rows) {
+function stopColumns(months) {
   return [
     {
       title: 'When',
@@ -169,7 +166,7 @@ function stopColumns(rows) {
           id: 'month',
           field: 'month',
           title: 'Month',
-          lookup: { options: monthOptions(rows), sortBy: 'optionOrder' },
+          lookup: { options: months, sortBy: 'optionOrder' },
           filter: { type: 'set' },
           layout: { width: 110 },
         },
@@ -220,58 +217,60 @@ function stopColumns(rows) {
 /* ------------------------------------------------------------------ */
 
 /**
- * Build the whole page into `root`.
+ * Build the whole page into `root`, empty, and return the handles that feed
+ * it.
+ *
+ * Rows arrive afterwards, a month at a time, through `ingest`. One data
+ * router partitions them by `dataset` and hands each viewer its slice as a
+ * keyed diff, so a month that is already on screen is updated in place
+ * rather than drawn twice, and the tiles, charts and tab badges follow the
+ * grids they read.
  *
  * @param {object} options
  * @param {HTMLElement} options.root where the dashboard is drawn
  * @param {Function} options.createGrid the grid factory
+ * @param {Function} options.createHeadlessGrid the headless grid factory, for tab badges
  * @param {Function} options.createChart the charts module's factory
  * @param {Function} options.createKPI the KPI module's factory
  * @param {Function} options.createTabs the tabs module's factory
- * @param {object[]} options.crimes the street crime rows
- * @param {object[]} options.stops the stop and search rows
- * @param {object} options.meta what was fetched, and when
- * @returns {object} the pieces that were built, for a caller that wants them
+ * @param {Function} options.createDataRouter the data router module's factory
+ * @param {string[]} options.months every month a row may carry, oldest first
+ * @returns {object} the pieces that were built and the calls that feed them
  */
-export function buildDashboard({ root, createGrid, createChart, createKPI, createTabs, crimes, stops, meta }) {
+export function buildDashboard({
+  root,
+  createGrid,
+  createHeadlessGrid,
+  createChart,
+  createKPI,
+  createTabs,
+  createDataRouter,
+  months,
+}) {
   root.textContent = '';
 
-  const months = monthsIn(crimes);
-  const period = months.length
-    ? `${monthLabel(months[0])} to ${monthLabel(months[months.length - 1])}`
-    : 'no months loaded';
+  const options = monthOptions(months);
 
   /* The masthead. */
   const header = el('header', 'head');
   const heading = el('div', 'head-text');
   heading.append(el('h1', null, 'Street crime in central London'));
-  heading.append(
-    el(
-      'p',
-      'lede',
-      `${commas(crimes.length)} recorded crimes and ${commas(stops.length)} stop and search records, ` +
-        `covering the West End, Westminster and the City. ${period}.`,
-    ),
-  );
-  /*
-   * When the live fetch could not be completed the saved copy is shown
-   * instead, and this says so. A reader should never have to wonder whether
-   * the figures in front of them are today's.
-   */
-  if (meta.fellBack) {
-    heading.append(
-      el(
-        'p',
-        'notice',
-        'The police data service could not be reached, so this is the saved copy. Reloading the page will try again.',
-      ),
-    );
-  }
+  const lede = el('p', 'lede', 'Loading...');
+  heading.append(lede);
+  /* Said when the figures are not today's: the saved copy standing in for a
+     service that could not be reached, or a month that would not refresh. A
+     reader should never have to wonder whether what they see is current. */
+  const notice = el('p', 'notice');
+  notice.hidden = true;
+  heading.append(notice);
   header.append(heading);
 
   const provenance = el('div', 'head-note');
-  provenance.append(el('span', 'pill', meta.live ? 'Live from the police data service' : 'Saved copy'));
-  provenance.append(el('span', null, meta.fetchedAt ? `Data fetched ${new Date(meta.fetchedAt).toLocaleString('en-GB')}` : ''));
+  const pill = el('span', 'pill', 'Saved copy');
+  const fetchedAt = el('span', 'fetched-at');
+  const progress = el('span', 'progress');
+  progress.hidden = true;
+  provenance.append(pill, fetchedAt, progress);
   header.append(provenance);
   root.append(header);
 
@@ -284,7 +283,161 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
   const tabsHost = el('section', 'tabs-host');
   root.append(tabsHost);
 
-  const built = { crimeGrid: null, stopGrid: null, charts: [], kpi: null, tabs: null };
+  /* Every row on the page, by id: what the router is loaded from when a
+     viewer arrives late, and what the headline counts are read from. */
+  const store = new Map();
+
+  const built = { crimeGrid: null, stopGrid: null, charts: [], kpi: null, tabs: null, router: null, store };
+
+  /** How many rows of a dataset the store holds, and which months. */
+  const summarise = (dataset) => {
+    let count = 0;
+    const seen = new Set();
+    for (const row of store.values()) {
+      if (row.dataset !== dataset) continue;
+      count += 1;
+      seen.add(row.month);
+    }
+    return { count, months: [...seen].sort() };
+  };
+
+  /** The sentence under the title: what is on the page right now. */
+  const refreshHeadline = () => {
+    const crimes = summarise('crime');
+    const stops = summarise('stop');
+    const period = crimes.months.length
+      ? `${monthLabel(crimes.months[0])} to ${monthLabel(crimes.months[crimes.months.length - 1])}`
+      : 'no months loaded yet';
+    lede.textContent =
+      `${commas(crimes.count)} recorded crimes and ${commas(stops.count)} stop and search records, ` +
+      `covering the West End, Westminster and the City. ${period}.`;
+  };
+
+  /* ---------------- the router ---------------- */
+
+  /*
+   * One stream in, two grids out. Rows are partitioned by `dataset`, so a
+   * crime reaches the crime grid and a stop and search the stop and search
+   * grid, and each grid is updated in place by `id`: a row it already holds
+   * is updated if it changed and left alone if it did not.
+   */
+  const router = createDataRouter({ key: 'dataset', rowKey: 'id' });
+  built.router = router;
+
+  /**
+   * Put months of data on the page, each replacing whatever the page held
+   * for that month of that dataset.
+   *
+   * A row already present with the same id is updated rather than added,
+   * which is what lets a live month land on top of the saved copy of the
+   * same month without doubling it. A row the page held for that month that
+   * the new copy no longer carries is taken off.
+   *
+   * Everything passed in goes through the router as one change, so the grids
+   * lay themselves out once for the batch rather than once per month. That
+   * is the difference between painting the saved copy in one go and doing
+   * it twelve times over.
+   *
+   * @param {{ dataset: 'crime'|'stop', month: string, rows: object[] }[]} batch
+   *   the months, each with the dataset its rows belong to and the month as
+   *   `YYYY-MM`
+   * @returns {{ applied: number, removed: number }} what was sent
+   */
+  const ingest = (batch) => {
+    const incoming = new Set();
+    const replaced = new Set();
+    for (const { dataset, month, rows } of batch) {
+      replaced.add(`${dataset} ${month}`);
+      for (const row of rows) incoming.add(String(row.id));
+    }
+    const deltas = [];
+    for (const [id, row] of store) {
+      if (replaced.has(`${row.dataset} ${row.month}`) && !incoming.has(id)) {
+        store.delete(id);
+        deltas.push({ op: 'delete', row });
+      }
+    }
+    const removed = deltas.length;
+    for (const { rows } of batch) {
+      for (const row of rows) {
+        store.set(String(row.id), row);
+        deltas.push({ op: 'upsert', row });
+      }
+    }
+    if (deltas.length) router.apply(deltas);
+    refreshHeadline();
+    return { applied: incoming.size, removed };
+  };
+  built.ingest = ingest;
+
+  /**
+   * Keep only these months, taking every other month off the page. Used
+   * once the live months have all landed, so a month the saved copy held
+   * that has since left the twelve month window goes with it.
+   *
+   * @param {string[]} keep the months to keep, as `YYYY-MM`
+   * @returns {number} how many rows were taken off
+   */
+  const retainMonths = (keep) => {
+    const wanted = new Set(keep);
+    const deltas = [];
+    for (const [id, row] of store) {
+      if (!wanted.has(row.month)) {
+        store.delete(id);
+        deltas.push({ op: 'delete', row });
+      }
+    }
+    if (deltas.length) router.apply(deltas);
+    refreshHeadline();
+    return deltas.length;
+  };
+  built.retainMonths = retainMonths;
+
+  /**
+   * Say where the figures came from and how fresh they are.
+   *
+   * @param {object} status
+   * @param {'saved'|'refreshing'|'live'|'partial'|'offline'} status.state
+   * @param {string} [status.fetchedAt] when the data on the page was fetched
+   * @param {number} [status.done] how many requests have landed, while refreshing
+   * @param {number} [status.total] how many there are, while refreshing
+   * @param {string[]} [status.failedMonths] the months that would not refresh
+   */
+  const setStatus = ({ state, fetchedAt: when, done, total, failedMonths }) => {
+    const failed = failedMonths || [];
+    const failedText = failed.map(monthLabel).join(', ');
+    const fetched = when ? `Data fetched ${new Date(when).toLocaleString('en-GB')}` : '';
+    progress.hidden = true;
+    progress.textContent = '';
+    notice.hidden = true;
+    notice.textContent = '';
+    fetchedAt.textContent = fetched;
+    if (state === 'saved') {
+      pill.textContent = 'Saved copy';
+    } else if (state === 'refreshing') {
+      pill.textContent = 'Saved copy - refreshing';
+      if (total) {
+        progress.hidden = false;
+        progress.textContent = `Refreshing from the police data service: ${done || 0} of ${total} months of data`;
+      }
+    } else if (state === 'live') {
+      pill.textContent = 'Live';
+    } else if (state === 'partial') {
+      pill.textContent = `Live - ${failed.length === 1 ? '1 month' : `${failed.length} months`} not refreshed`;
+      notice.hidden = false;
+      notice.textContent =
+        `${failedText} could not be fetched from the police data service after two attempts, ` +
+        'so the saved copy is shown for that period. Reloading the page will try again.';
+    } else if (state === 'offline') {
+      pill.textContent = 'Saved copy';
+      notice.hidden = false;
+      notice.textContent =
+        'The police data service could not be reached, so this is the saved copy. Reloading the page will try again.';
+    }
+  };
+  built.setStatus = setStatus;
+
+  /* ---------------- the panes ---------------- */
 
   /** Two rows of chart panes over the crime grid. */
   const chartPane = (host) => {
@@ -300,12 +453,11 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
     const grid = built.crimeGrid;
     if (!grid) return { destroy() {} };
 
-
     /*
      * Every chart here reads the crime grid, so all four follow whatever the
-     * grid is filtered to. The order along the bottom of each chart is the
-     * order the grid walks its rows, which is why the Month column is sorted
-     * oldest first.
+     * grid is filtered to, and redraw as each month lands in it. The order
+     * along the bottom of each chart is the order the grid walks its rows,
+     * which is why the Month column is sorted oldest first.
      */
     const specs = [
       {
@@ -362,7 +514,16 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
     };
   };
 
-  /** The stop and search pane: its own grid, with a chart beside it. */
+  /**
+   * The stop and search pane: its own grid, with a chart beside it.
+   *
+   * The pane is built the first time its tab is opened, so its grid joins
+   * the router at that moment and is handed the stop and search rows that
+   * arrived before it existed. From then on it is fed like the crime grid.
+   *
+   * What is returned exposes the grid's rows and events, which is how the
+   * tab's badge counts them.
+   */
   const stopPane = (host) => {
     const split = el('div', 'split');
     const chartBox = el('div', 'chart-box tall');
@@ -372,8 +533,8 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
 
     const grid = createGrid(gridBox, {
       rowKey: 'id',
-      rows: stops,
-      columns: stopColumns(stops),
+      rows: [],
+      columns: stopColumns(options),
       theme: 'light',
       density: 'compact',
       stripedRows: true,
@@ -387,6 +548,11 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
       title: 'Stop and search',
     });
     built.stopGrid = grid;
+
+    router.attach(grid, 'stop');
+    const waiting = [];
+    for (const row of store.values()) if (row.dataset === 'stop') waiting.push({ op: 'upsert', row });
+    if (waiting.length) router.apply(waiting);
 
     try {
       built.charts.push(
@@ -409,7 +575,12 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
     }
 
     return {
+      grid,
+      rows: grid.rows,
+      on: (name, fn) => grid.on(name, fn),
+      off: (name, fn) => grid.off(name, fn),
       destroy() {
+        router.detach(grid);
         grid.destroy();
       },
     };
@@ -430,6 +601,7 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
 
   const tabs = createTabs(tabsHost, {
     createGrid,
+    createHeadlessGrid,
     ariaLabel: 'Dashboard views',
     onBeforeTabChange: (event) => showActionsFor(event.id),
     onTabChangeCancelled: (event) => showActionsFor(event.previousId),
@@ -440,8 +612,8 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
         badge: true,
         config: {
           rowKey: 'id',
-          rows: crimes,
-          columns: crimeColumns(crimes),
+          rows: [],
+          columns: crimeColumns(options),
           theme: 'light',
           density: 'compact',
           stripedRows: true,
@@ -457,11 +629,15 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
         },
       },
       { id: 'charts', label: 'Charts', view: chartPane },
-      { id: 'stops', label: 'Stop and search', badge: stops.length, view: stopPane },
+      /* The count appears once the tab has been opened and its grid exists
+         to be counted; from then on it follows the grid. */
+      { id: 'stops', label: 'Stop and search', badge: true, view: stopPane },
     ],
   });
   built.tabs = tabs;
   built.crimeGrid = tabs.tab('crime');
+
+  router.attach(built.crimeGrid, 'crime');
 
   /*
    * The commonest crime type reads as words, and every tile in the panel is
@@ -549,8 +725,9 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
     });
   }
 
-  /* Recomputing whenever the grid's filters or arrangement move keeps the
-     figures honest about what is actually in view. */
+  /* Recomputing whenever the grid's rows, filters or arrangement move keeps
+     the figures honest about what is actually in view, month by month as
+     the data lands. */
   if (built.crimeGrid) {
     const refresh = () => {
       const rows = matchedRows();
@@ -598,5 +775,6 @@ export function buildDashboard({ root, createGrid, createChart, createKPI, creat
   footer.append(line);
   root.append(footer);
 
+  refreshHeadline();
   return built;
 }

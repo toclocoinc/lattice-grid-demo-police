@@ -5,7 +5,8 @@
     "start": "node tools/serve.mjs",
     "snapshot": "node tools/build-snapshot.mjs",
     "preview": "node tools/build-preview.mjs",
-    "verify": "node tools/verify.mjs"
+    "verify": "node tools/verify.mjs",
+    "measure": "node tools/measure-load.mjs"
   },
   "license": "MIT",
   "description": "A dashboard of recorded street crime and stop and search in central London.",

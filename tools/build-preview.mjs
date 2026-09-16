@@ -16,7 +16,7 @@ const pkgDir = join(root, 'node_modules', '@toclocoinc', 'lattice-grid');
 const CDN = 'https://cdn.jsdelivr.net/npm/@toclocoinc/lattice-grid@1.61.0';
 
 /** Fields that are worked out again on the way in rather than being stored. */
-const DERIVED = new Set(['monthLabel', 'count']);
+const DERIVED = new Set(['monthLabel', 'count', 'dataset']);
 
 /**
  * Pack rows column by column.
@@ -99,21 +99,32 @@ function safeJSON(value) {
     .join('\\u2029');
 }
 
-const [crimes, stops, meta, gridCss, pageCss, apiSrc, dashSrc] = await Promise.all([
-  readFile(join(root, 'data', 'snapshot', 'crimes.json'), 'utf8').then(JSON.parse),
-  readFile(join(root, 'data', 'snapshot', 'stops.json'), 'utf8').then(JSON.parse),
-  readFile(join(root, 'data', 'snapshot', 'meta.json'), 'utf8').then(JSON.parse),
+const snapshotDir = join(root, 'data', 'snapshot');
+const meta = JSON.parse(await readFile(join(snapshotDir, 'meta.json'), 'utf8'));
+
+/** Every month of one dataset of the saved copy, which is kept one file per month. */
+async function readMonths(name) {
+  const rows = [];
+  for (const month of meta.months) {
+    rows.push(...JSON.parse(await readFile(join(snapshotDir, name, `${month}.json`), 'utf8')));
+  }
+  return rows;
+}
+
+const [crimes, stops, gridCss, pageCss, apiSrc, dashSrc] = await Promise.all([
+  readMonths('crimes'),
+  readMonths('stops'),
   readFile(join(pkgDir, 'lattice-grid.min.css'), 'utf8'),
   readFile(join(root, 'styles.css'), 'utf8'),
   readFile(join(root, 'src', 'police-api.js'), 'utf8'),
   readFile(join(root, 'src', 'dashboard.js'), 'utf8'),
 ]);
 
-const packed = { crimes: pack(crimes), stops: pack(stops), meta: { ...meta, live: false } };
+const packed = { crimes: pack(crimes), stops: pack(stops), meta };
 
 const bootstrap = `
 /** Put the packed columns back together as ordinary rows. */
-function unpack(packedRows) {
+function unpack(packedRows, dataset) {
   var rows = new Array(packedRows.n);
   var entries = Object.entries(packedRows.columns);
   for (var i = 0; i < packedRows.n; i += 1) {
@@ -125,6 +136,7 @@ function unpack(packedRows) {
     }
     row.monthLabel = monthLabel(row.month);
     row.count = 1;
+    row.dataset = dataset;
     rows[i] = row;
   }
   return rows;
@@ -156,13 +168,32 @@ function showFailure(host, error) {
     var built = buildDashboard({
       root: host,
       createGrid: window.LatticeGrid.createGrid,
+      createHeadlessGrid: window.LatticeGrid.createHeadlessGrid,
       createChart: window.LatticeGrid.createChart,
       createKPI: window.LatticeGridKPI.createKPI,
       createTabs: window.LatticeGridTabs.createTabs,
-      crimes: unpack(packedData.crimes),
-      stops: unpack(packedData.stops),
-      meta: packedData.meta
+      createDataRouter: window.LatticeGridDataRouter.createDataRouter,
+      months: packedData.meta.months
     });
+    /* The rows go in the way the served page's do: a month at a time,
+       through the router. */
+    var byMonth = function (rows) {
+      var groups = {};
+      for (var i = 0; i < rows.length; i += 1) {
+        (groups[rows[i].month] = groups[rows[i].month] || []).push(rows[i]);
+      }
+      return groups;
+    };
+    var crimeMonths = byMonth(unpack(packedData.crimes, 'crime'));
+    var stopMonths = byMonth(unpack(packedData.stops, 'stop'));
+    var months = packedData.meta.months;
+    var batch = [];
+    for (var m = 0; m < months.length; m += 1) {
+      batch.push({ dataset: 'crime', month: months[m], rows: crimeMonths[months[m]] || [] });
+      batch.push({ dataset: 'stop', month: months[m], rows: stopMonths[months[m]] || [] });
+    }
+    built.ingest(batch);
+    built.setStatus({ state: 'saved', fetchedAt: packedData.meta.fetchedAt });
     built.timings = { mode: 'preview', buildMs: Math.round(performance.now() - began) };
     built.ready = true;
     window.__policeDemo = built;
@@ -201,6 +232,7 @@ ${pageCss}
     <script src="${CDN}/modules/charts.min.js"></script>
     <script src="${CDN}/modules/kpi.min.js"></script>
     <script src="${CDN}/modules/tabs.min.js"></script>
+    <script src="${CDN}/modules/data-router.min.js"></script>
 
     <script>
 ${flatten(apiSrc)}

@@ -1,269 +1,233 @@
 /**
  * Load the demo in a real browser and check that it works.
  *
- * Serves the project, opens the saved copy so the check never depends on the
- * police data service being reachable, waits for the dashboard to report
- * itself ready, and then insists on three things: the grid holds rows, the
- * stop and search tab holds rows, and the page logged no errors.
+ * Serves the project and opens it three ways, none of which depends on the
+ * police data service being reachable:
+ *
+ *   - the saved copy (`?source=snapshot`): the grid holds rows, the stop and
+ *     search tab holds rows, the page logged no errors, and a month sent to
+ *     the page a second time updates the rows it already has rather than
+ *     adding them again;
+ *   - the live page with the service blocked in the browser: the saved copy
+ *     is on screen within two seconds, the page says the service could not
+ *     be reached, and nothing was thrown;
+ *   - with `--live`, the live page for real: every month lands, the badge
+ *     reads Live, and the page logged no errors. Off by default because it
+ *     depends on a service we do not run.
  *
  * Exits non-zero when any of that fails, so it can gate a deployment.
  *
- * Usage: node tools/verify.mjs
+ * Usage: node tools/verify.mjs [--live]
  */
 
-import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
-import { access, mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { launchBrowser } from './browser.mjs';
 import { startServer } from './serve.mjs';
 
-const CHROME_CANDIDATES = [
-  process.env.CHROME_PATH,
-  '/usr/bin/google-chrome',
-  '/usr/bin/google-chrome-stable',
-  '/usr/bin/chromium',
-  '/usr/bin/chromium-browser',
-  '/snap/bin/chromium',
-].filter(Boolean);
-
-/** The first browser on this machine that actually exists. */
-async function findChrome() {
-  for (const path of CHROME_CANDIDATES) {
-    try {
-      await access(path);
-      return path;
-    } catch {}
-  }
-  throw new Error(
-    `No browser found. Tried:\n  ${CHROME_CANDIDATES.join('\n  ')}\nSet CHROME_PATH to point at one.`,
-  );
-}
-
-/**
- * This check talks to the browser over a WebSocket, which Node only provides
- * as a global from version 22. Say so plainly rather than failing later with
- * an unexplained missing name.
- */
-function requireModernNode() {
-  if (typeof WebSocket === 'undefined') {
-    throw new Error(
-      `This check needs Node 22 or newer. You are running ${process.version}, which has no built in WebSocket.`,
-    );
-  }
-}
-
-/** A free TCP port, asked of the operating system. */
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const probe = createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const { port } = probe.address();
-      probe.close(() => resolve(port));
-    });
-  });
-}
-
+const withLive = process.argv.includes('--live');
 const failures = [];
 let browser;
-let profile;
 let server;
 
+/** The state of the page, as the checks below read it. */
+const READ_STATE = `(() => {
+  const demo = window.__policeDemo;
+  const notice = document.querySelector('.notice');
+  const pill = document.querySelector('.head-note .pill');
+  const note = document.querySelector('.head-note');
+  const grid = demo && demo.crimeGrid;
+  const months = new Set();
+  if (grid) grid.rows.forEachAll((row) => { if (row && row.data) months.add(row.data.month); });
+  return {
+    ready: !!(demo && demo.ready),
+    error: (demo && demo.error) || null,
+    rows: grid ? grid.rows.totalCount() : 0,
+    shown: grid ? grid.rows.count() : 0,
+    months: [...months].sort(),
+    painted: document.querySelectorAll('.lattice [role="row"]').length,
+    columns: grid ? grid.columns.visible().length : 0,
+    timings: demo ? demo.timings : null,
+    live: demo ? demo.live : null,
+    badge: pill ? pill.textContent.trim() : null,
+    notice: notice && !notice.hidden ? notice.textContent.trim() : null,
+    fetchedAtShown: note ? /Data fetched/.test(note.textContent) : false,
+    tabs: [...document.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent.trim()),
+  };
+})()`;
+
 try {
-  requireModernNode();
-  const chromePath = await findChrome();
   const started = await startServer(0);
   server = started.server;
-  const url = `http://127.0.0.1:${started.port}/index.html?source=snapshot`;
-  console.log(`Browser: ${chromePath}`);
-  console.log(`Opening: ${url}`);
+  const base = `http://127.0.0.1:${started.port}/index.html`;
+  browser = await launchBrowser();
+  const { call, evaluate, waitFor, consoleErrors, pageErrors } = browser;
+  console.log(`Browser: ${browser.chromePath}`);
 
-  profile = await mkdtemp(join(tmpdir(), 'police-demo-verify-'));
-  /* A port of the operating system's choosing, so two checks running side by
-     side on one machine cannot land on the same debugging socket. */
-  const port = await freePort();
-  browser = spawn(chromePath, [
-    '--headless=new',
-    `--remote-debugging-port=${port}`,
-    `--user-data-dir=${profile}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--no-sandbox',
-    '--disable-gpu',
-    '--disable-dev-shm-usage',
-    '--hide-scrollbars',
-    '--window-size=1440,900',
-    'about:blank',
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
-  browser.stderr.on('data', () => {});
+  /* Console lines a blocked request writes on its own account: the browser
+     reporting the block, which is the point of that check, not a defect. */
+  const realConsoleErrors = () => consoleErrors.filter((line) => !/ERR_BLOCKED_BY_CLIENT/.test(line));
 
-  let wsUrl;
-  for (let i = 0; i < 150 && !wsUrl; i += 1) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
-      if (response.ok) wsUrl = (await response.json()).webSocketDebuggerUrl;
-    } catch {}
-    if (!wsUrl) await sleep(200);
-  }
-  if (!wsUrl) throw new Error('the browser never opened its debugging port');
+  /* ------------------------------------------------------------------ */
+  /* The saved copy                                                      */
+  /* ------------------------------------------------------------------ */
 
-  const socket = new WebSocket(wsUrl);
-  await new Promise((done, fail) => {
-    socket.onopen = done;
-    socket.onerror = () => fail(new Error('could not attach to the browser'));
-  });
-
-  let nextId = 0;
-  const pending = new Map();
-  const consoleErrors = [];
-  const pageErrors = [];
-
-  socket.onmessage = (event) => {
-    const message = JSON.parse(event.data);
-    if (message.id != null && pending.has(message.id)) {
-      const { resolve, reject } = pending.get(message.id);
-      pending.delete(message.id);
-      if (message.error) reject(new Error(JSON.stringify(message.error)));
-      else resolve(message.result);
-      return;
-    }
-    if (message.method === 'Runtime.consoleAPICalled' && message.params.type === 'error') {
-      consoleErrors.push(message.params.args.map((a) => a.value ?? a.description ?? a.type).join(' '));
-    }
-    if (message.method === 'Runtime.exceptionThrown') {
-      const details = message.params.exceptionDetails;
-      pageErrors.push(details.exception?.description || details.text);
-    }
-    if (message.method === 'Log.entryAdded' && message.params.entry.level === 'error') {
-      consoleErrors.push(message.params.entry.text);
-    }
-  };
-
-  const send = (method, params = {}, sessionId) =>
-    new Promise((resolve, reject) => {
-      const id = ++nextId;
-      pending.set(id, { resolve, reject });
-      socket.send(JSON.stringify({ id, method, params, sessionId }));
-    });
-
-  const { targetId } = await send('Target.createTarget', { url: 'about:blank' });
-  const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
-  const call = (method, params) => send(method, params, sessionId);
-
-  await call('Page.enable');
-  await call('Runtime.enable');
-  await call('Log.enable');
-  await call('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
-  await call('Page.navigate', { url });
-
-  const evaluate = async (expression) => {
-    const result = await call('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
-    if (result.exceptionDetails) {
-      throw new Error(result.exceptionDetails.text + ' ' + (result.exceptionDetails.exception?.description || ''));
-    }
-    return result.result.value;
-  };
-
-  const waitFor = async (expression, timeout, what) => {
-    const until = Date.now() + timeout;
-    while (Date.now() < until) {
-      let value;
-      try {
-        value = await evaluate(expression);
-      } catch {}
-      if (value) return value;
-      await sleep(250);
-    }
-    throw new Error(`timed out waiting for ${what}`);
-  };
-
-  await waitFor('!!(window.__policeDemo)', 120000, 'the dashboard to load');
-  const state = await evaluate('({ ready: window.__policeDemo.ready, error: window.__policeDemo.error || null })');
-  if (!state.ready) throw new Error(`the dashboard reported a failure: ${state.error}`);
-
+  console.log(`\nOpening the saved copy: ${base}?source=snapshot`);
+  await call('Page.navigate', { url: `${base}?source=snapshot` });
+  await waitFor('!!(window.__policeDemo && window.__policeDemo.ready)', 120000, 'the dashboard to load');
   await waitFor('window.__policeDemo.crimeGrid && window.__policeDemo.crimeGrid.rows.count() > 0', 60000, 'the crime rows');
 
-  const crime = await evaluate(`(() => {
-    const grid = window.__policeDemo.crimeGrid;
-    return {
-      total: grid.rows.totalCount(),
-      shown: grid.rows.count(),
-      columns: grid.columns.visible().length,
-      painted: document.querySelectorAll('.lattice [role="row"]').length,
-    };
-  })()`);
-  console.log(`Crime grid: ${crime.total} rows, ${crime.columns} columns, ${crime.painted} painted.`);
-  if (!(crime.total > 0)) failures.push(`the crime grid holds ${crime.total} rows`);
-  if (!(crime.painted > 0)) failures.push('the crime grid painted no rows');
+  const saved = await evaluate(READ_STATE);
+  console.log(`  crime grid: ${saved.rows} rows, ${saved.columns} columns, ${saved.painted} painted, ${saved.months.length} months`);
+  console.log(`  first rows on screen at ${saved.timings.firstPaintMs} ms, the whole saved copy at ${saved.timings.savedMs} ms`);
+  if (!(saved.rows > 0)) failures.push(`the crime grid holds ${saved.rows} rows`);
+  if (!(saved.painted > 0)) failures.push('the crime grid painted no rows');
+  if (saved.badge !== 'Saved copy') failures.push(`the saved copy's badge read "${saved.badge}" rather than "Saved copy"`);
+  if (!saved.fetchedAtShown) failures.push("the saved copy's date was not shown");
+  if (!saved.tabs.some((tab) => /^Street crime/.test(tab) && /\d/.test(tab))) {
+    failures.push(`the Street crime tab carries no row count (tabs: ${saved.tabs.join(' | ')})`);
+  }
 
   await evaluate("window.__policeDemo.tabs.activate('stops')");
   await waitFor('window.__policeDemo.stopGrid && window.__policeDemo.stopGrid.rows.count() > 0', 60000, 'the stop and search rows');
   const stops = await evaluate('window.__policeDemo.stopGrid.rows.totalCount()');
-  console.log(`Stop and search grid: ${stops} rows.`);
+  console.log(`  stop and search grid: ${stops} rows.`);
   if (!(stops > 0)) failures.push(`the stop and search grid holds ${stops} rows`);
 
+  /*
+   * A month landing a second time.
+   *
+   * This is what happens in live mode whenever the service answers for a
+   * month the saved copy already holds. The newest month is sent to the page
+   * again three ways, exactly as the live fetch sends it, and the grid is
+   * counted by id before and after: the same rows change nothing, a changed
+   * row is updated in place, and a row that has gone is taken off. Nothing
+   * is ever added twice.
+   */
+  console.log('\nA month landing a second time:');
+  const twice = await evaluate(`(() => {
+    const demo = window.__policeDemo;
+    const grid = demo.crimeGrid;
+    const ids = () => { const seen = new Set(); grid.rows.forEachAll((row) => { if (row && row.data) seen.add(String(row.data.id)); }); return seen; };
+    const month = [...demo.store.values()].filter((row) => row.dataset === 'crime').map((row) => row.month).sort().pop();
+    const rows = [...demo.store.values()].filter((row) => row.dataset === 'crime' && row.month === month).map((row) => ({ ...row }));
+    const stopRows = [...demo.store.values()].filter((row) => row.dataset === 'stop' && row.month === month).map((row) => ({ ...row }));
+    const before = { total: grid.rows.totalCount(), ids: ids().size, stops: demo.stopGrid.rows.totalCount() };
+
+    demo.ingest([{ dataset: 'crime', month, rows }, { dataset: 'stop', month, rows: stopRows }]);
+    const same = { total: grid.rows.totalCount(), ids: ids().size, stops: demo.stopGrid.rows.totalCount() };
+
+    const changed = rows.map((row, i) => (i === 0 ? { ...row, outcome: 'Changed for the check' } : row));
+    demo.ingest([{ dataset: 'crime', month, rows: changed }]);
+    const updated = { total: grid.rows.totalCount(), ids: ids().size, outcome: grid.rows.value(String(rows[0].id), 'outcome') };
+
+    demo.ingest([{ dataset: 'crime', month, rows: rows.slice(1) }]);
+    const dropped = { total: grid.rows.totalCount(), ids: ids().size, gone: !grid.rows.byKey(String(rows[0].id)) };
+
+    demo.ingest([{ dataset: 'crime', month, rows }]);
+    const restored = { total: grid.rows.totalCount(), ids: ids().size, outcome: grid.rows.value(String(rows[0].id), 'outcome') };
+    return { month, sent: rows.length, before, same, updated, dropped, restored };
+  })()`);
+  console.log(`  ${twice.month}: ${twice.sent} rows sent again; ${twice.before.total} rows before, ${twice.same.total} after (${twice.same.ids} distinct ids)`);
+  console.log(`  one row changed: ${twice.updated.total} rows, outcome now "${twice.updated.outcome}"; one row gone: ${twice.dropped.total} rows; restored: ${twice.restored.total} rows`);
+  if (twice.same.total !== twice.before.total || twice.same.ids !== twice.before.ids) {
+    failures.push(`sending a month again changed the row count from ${twice.before.total} to ${twice.same.total} (${twice.same.ids} distinct ids)`);
+  }
+  if (twice.same.stops !== twice.before.stops) {
+    failures.push(`sending a month of stop and search again changed its row count from ${twice.before.stops} to ${twice.same.stops}`);
+  }
+  if (twice.updated.total !== twice.before.total || twice.updated.outcome !== 'Changed for the check') {
+    failures.push(`a changed row was not updated in place (${twice.updated.total} rows, outcome "${twice.updated.outcome}")`);
+  }
+  if (twice.dropped.total !== twice.before.total - 1 || !twice.dropped.gone) {
+    failures.push(`a row missing from a month that landed again was not taken off (${twice.dropped.total} rows)`);
+  }
+  if (twice.restored.total !== twice.before.total || twice.restored.outcome === 'Changed for the check') {
+    failures.push(`the month could not be restored (${twice.restored.total} rows, outcome "${twice.restored.outcome}")`);
+  }
+
   await sleep(500);
-  if (consoleErrors.length) failures.push(`the page logged ${consoleErrors.length} console error(s):\n    ${consoleErrors.join('\n    ')}`);
-  if (pageErrors.length) failures.push(`the page threw ${pageErrors.length} error(s):\n    ${pageErrors.join('\n    ')}`);
+  if (realConsoleErrors().length) failures.push(`the saved copy logged ${realConsoleErrors().length} console error(s):\n    ${realConsoleErrors().join('\n    ')}`);
+  if (pageErrors.length) failures.push(`the saved copy threw ${pageErrors.length} error(s):\n    ${pageErrors.join('\n    ')}`);
+
+  /* ------------------------------------------------------------------ */
+  /* The service unreachable                                             */
+  /* ------------------------------------------------------------------ */
 
   /*
    * What a visitor gets when the police data service cannot be reached.
    *
    * The service is blocked in the browser rather than asked politely to fail,
    * so this exercises the same path a real outage takes and the demo carries
-   * no test only code. A failed request does log to the console, so the check
-   * here is that nothing was thrown and the saved copy is on screen saying so.
+   * no test only code. The saved copy has to be on screen within two seconds
+   * of the page arriving, which is before any live request could have
+   * answered, and the page has to say what it is showing.
    */
   console.log('\nWith the police data service unreachable:');
+  consoleErrors.length = 0;
   pageErrors.length = 0;
   await call('Network.enable');
   await call('Network.setBlockedURLs', { urls: ['*data.police.uk*'] });
-  await call('Page.navigate', { url: `http://127.0.0.1:${started.port}/index.html` });
+  await call('Page.navigate', { url: base });
 
-  await waitFor('!!(window.__policeDemo)', 120000, 'the page to settle with the service blocked');
-  const fallback = await evaluate(`(() => {
-    const demo = window.__policeDemo;
-    const notice = document.querySelector('.notice');
-    const pill = document.querySelector('.head-note .pill');
-    const note = document.querySelector('.head-note');
-    return {
-      ready: !!demo.ready,
-      error: demo.error || null,
-      rows: demo.crimeGrid ? demo.crimeGrid.rows.totalCount() : 0,
-      painted: document.querySelectorAll('.lattice [role="row"]').length,
-      fellBack: !!(demo.timings && demo.timings.fellBack),
-      mode: demo.timings && demo.timings.mode,
-      badge: pill ? pill.textContent.trim() : null,
-      notice: notice ? notice.textContent.trim() : null,
-      fetchedAtShown: note ? /Data fetched/.test(note.textContent) : false,
-    };
-  })()`);
-  if (!fallback.ready) failures.push(`the page did not fall back to the saved copy, it failed outright: ${fallback.error}`);
-  console.log(`  rows ${fallback.rows}, badge "${fallback.badge}", fell back: ${fallback.fellBack}`);
+  await waitFor('!!(window.__policeDemo && window.__policeDemo.crimeGrid && window.__policeDemo.crimeGrid.rows.count() > 0)', 30000, 'rows with the service blocked');
+  const early = await evaluate(READ_STATE);
+  console.log(`  first rows on screen at ${early.timings.firstPaintMs} ms after the page arrived (${early.rows} rows, badge "${early.badge}")`);
+  if (!(early.timings.firstPaintMs <= 2000)) {
+    failures.push(`the saved copy took ${early.timings.firstPaintMs} ms to reach the screen, more than the 2000 ms allowed`);
+  }
+  if (early.badge !== 'Saved copy - refreshing' && early.badge !== 'Saved copy') {
+    failures.push(`while the service was being asked the badge read "${early.badge}"`);
+  }
+
+  await waitFor('!!(window.__policeDemo && window.__policeDemo.live && window.__policeDemo.live.settled)', 120000, 'the page to settle with the service blocked');
+  const fallback = await evaluate(READ_STATE);
+  console.log(`  settled at ${fallback.timings.liveMs} ms: ${fallback.rows} rows, badge "${fallback.badge}", fell back: ${fallback.timings.fellBack}`);
   console.log(`  notice: ${fallback.notice}`);
-
+  if (!fallback.ready) failures.push(`the page did not fall back to the saved copy, it failed outright: ${fallback.error}`);
   if (!(fallback.rows > 0)) failures.push(`the fallback showed ${fallback.rows} rows`);
   if (!(fallback.painted > 0)) failures.push('the fallback painted no rows');
-  if (!fallback.fellBack) failures.push('the page did not record that it fell back to the saved copy');
-  if (fallback.mode !== 'live') failures.push(`the fallback ran in "${fallback.mode}" mode, not the live default`);
+  if (!fallback.timings.fellBack) failures.push('the page did not record that it fell back to the saved copy');
+  if (fallback.timings.mode !== 'live') failures.push(`the fallback ran in "${fallback.timings.mode}" mode, not the live default`);
   if (fallback.badge !== 'Saved copy') failures.push(`the badge read "${fallback.badge}" rather than "Saved copy"`);
   if (!fallback.notice || !/could not be reached/i.test(fallback.notice)) {
     failures.push(`the page did not say the service was unreachable (notice: ${fallback.notice})`);
   }
-  if (!fallback.fetchedAtShown) failures.push('the saved copy\'s date was not shown');
+  if (!fallback.fetchedAtShown) failures.push("the saved copy's date was not shown");
+  if (realConsoleErrors().length) failures.push(`the fallback logged ${realConsoleErrors().length} console error(s):\n    ${realConsoleErrors().join('\n    ')}`);
   if (pageErrors.length) failures.push(`the fallback threw ${pageErrors.length} error(s):\n    ${pageErrors.join('\n    ')}`);
-
   await call('Network.setBlockedURLs', { urls: [] });
-  socket.close();
+
+  /* ------------------------------------------------------------------ */
+  /* Live, on request                                                    */
+  /* ------------------------------------------------------------------ */
+
+  if (withLive) {
+    console.log('\nLive, from the police data service:');
+    consoleErrors.length = 0;
+    pageErrors.length = 0;
+    await call('Page.navigate', { url: base });
+    await waitFor('!!(window.__policeDemo && window.__policeDemo.crimeGrid && window.__policeDemo.crimeGrid.rows.count() > 0)', 30000, 'the first rows in live mode');
+    const first = await evaluate(READ_STATE);
+    console.log(`  first rows on screen at ${first.timings.firstPaintMs} ms (badge "${first.badge}")`);
+    await waitFor('!!(window.__policeDemo && window.__policeDemo.live && window.__policeDemo.live.settled)', 240000, 'every live month to land');
+    const live = await evaluate(READ_STATE);
+    console.log(`  all months landed at ${live.timings.liveMs} ms over ${live.live.requests} requests: ${live.rows} rows, ${live.months.length} months, badge "${live.badge}"`);
+    if (live.live.failed.length) console.log(`  not refreshed: ${live.live.failed.join(', ')}`);
+    if (live.timings.fellBack) failures.push('the live page fell back to the saved copy');
+    if (!/^Live/.test(live.badge)) failures.push(`after every month landed the badge read "${live.badge}"`);
+    if (live.months.length !== live.live.months) {
+      failures.push(`the grid holds ${live.months.length} months (${live.months.join(', ')}) against ${live.live.months} live months`);
+    }
+    if (!live.fetchedAtShown) failures.push('the live fetch time was not shown');
+    await sleep(500);
+    if (consoleErrors.length) failures.push(`the live page logged ${consoleErrors.length} console error(s):\n    ${consoleErrors.join('\n    ')}`);
+    if (pageErrors.length) failures.push(`the live page threw ${pageErrors.length} error(s):\n    ${pageErrors.join('\n    ')}`);
+  }
 } catch (error) {
   failures.push(String(error.message || error));
 } finally {
-  if (browser) browser.kill('SIGKILL');
+  if (browser) await browser.close();
   if (server) server.close();
-  await sleep(300);
-  if (profile) await rm(profile, { recursive: true, force: true });
 }
 
 if (failures.length) {

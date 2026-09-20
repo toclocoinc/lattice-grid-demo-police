@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const pkgDir = join(root, 'node_modules', '@toclocoinc', 'lattice-grid');
-const CDN = 'https://cdn.jsdelivr.net/npm/@toclocoinc/lattice-grid@1.61.0';
+const CDN = 'https://cdn.jsdelivr.net/npm/@toclocoinc/lattice-grid@1.66.0';
 
 /** Fields that are worked out again on the way in rather than being stored. */
 const DERIVED = new Set(['monthLabel', 'count', 'dataset']);

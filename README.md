@@ -111,3 +111,6 @@ Lattice Grid itself is a separate commercial product with its own terms. It is f
 Contains public sector information licensed under the Open Government Licence v3.0
 
 The data comes from [data.police.uk](https://data.police.uk/).
+
+---
+Built with [Lattice Grid](https://www.latticegrid.dev), a JavaScript data grid with a Data Router: one live feed keeps grids, charts, boards, Gantt and KPI tiles in step. [Documentation](https://www.latticegrid.dev/docs/) · [Demos](https://www.latticegrid.dev/demos/) · [Licence](https://www.latticegrid.dev/licence/)

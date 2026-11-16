@@ -13,7 +13,12 @@ import { fileURLToPath } from 'node:url';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const pkgDir = join(root, 'node_modules', '@toclocoinc', 'lattice-grid');
-const CDN = 'https://cdn.latticegrid.dev/lattice-grid@1.111.5';
+/* The grid version is read from package.json, so the page loaded from disk
+   and the one served from node_modules always run the same release. */
+const GRID_VERSION = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).dependencies['@toclocoinc/lattice-grid'];
+const BASE = `https://cdn.latticegrid.dev/lattice-grid@${GRID_VERSION}`;
+/* A fresh stamp for each build, so a browser never keeps an older copy. */
+const STAMP = new Date().toISOString().slice(0, 10).replace(/-/g, '');
 
 /** Fields that are worked out again on the way in rather than being stored. */
 const DERIVED = new Set(['monthLabel', 'count', 'dataset']);
@@ -228,11 +233,11 @@ ${pageCss}
 
     <script id="police-data" type="application/json">${safeJSON(packed)}</script>
 
-    <script src="${CDN}/lattice-grid.min.js"></script>
-    <script src="${CDN}/modules/charts.min.js"></script>
-    <script src="${CDN}/modules/kpi.min.js"></script>
-    <script src="${CDN}/modules/tabs.min.js"></script>
-    <script src="${CDN}/modules/data-router.min.js"></script>
+    <script src="${BASE}/lattice-grid.min.js?v=${STAMP}"></script>
+    <script src="${BASE}/modules/charts.min.js?v=${STAMP}"></script>
+    <script src="${BASE}/modules/kpi.min.js?v=${STAMP}"></script>
+    <script src="${BASE}/modules/tabs.min.js?v=${STAMP}"></script>
+    <script src="${BASE}/modules/data-router.min.js?v=${STAMP}"></script>
 
     <script>
 ${flatten(apiSrc)}
